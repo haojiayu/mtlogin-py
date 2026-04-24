@@ -4,9 +4,10 @@ import json
 import os
 import secrets
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from functools import wraps
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests as std_requests
 import mtlogin
@@ -42,6 +43,10 @@ def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def scheduler_now(scheduler_timezone: tzinfo) -> datetime:
+    return datetime.now(scheduler_timezone)
+
+
 def parse_int(value: Any, field_name: str, default: int = 0) -> int:
     if value in (None, ""):
         return default
@@ -74,11 +79,35 @@ def safe_int(value: str) -> int:
         return 0
 
 
-def next_run_text(crontab_expr: Any) -> str:
+def load_scheduler_timezone(timezone_name: str = "") -> tzinfo:
+    name = str(timezone_name or os.getenv("SCHEDULER_TIMEZONE", "") or os.getenv("TZ", "")).strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            log_info(f"Invalid SCHEDULER_TIMEZONE={name}, falling back to process local timezone")
+    return datetime.now().astimezone().tzinfo or ZoneInfo("UTC")
+
+
+def next_run_at(crontab_expr: Any, scheduler_timezone: tzinfo, current_time: Optional[datetime] = None) -> Optional[datetime]:
     expr = str(crontab_expr or "").strip()
     if not expr or not croniter.is_valid(expr):
-        return ""
-    return croniter(expr, datetime.now()).get_next(datetime).strftime("%Y-%m-%d %H:%M:%S")
+        return None
+    base_time = current_time or scheduler_now(scheduler_timezone)
+    if base_time.tzinfo is None:
+        base_time = base_time.replace(tzinfo=scheduler_timezone)
+    else:
+        base_time = base_time.astimezone(scheduler_timezone)
+    return croniter(expr, base_time).get_next(datetime)
+
+
+def format_schedule_time(value: datetime) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def next_run_text(crontab_expr: Any, scheduler_timezone: tzinfo) -> str:
+    next_run = next_run_at(crontab_expr, scheduler_timezone)
+    return format_schedule_time(next_run) if next_run else ""
 
 
 class SettingsStore:
@@ -763,9 +792,10 @@ class NotificationDispatcher:
 
 
 class BackgroundScheduler:
-    def __init__(self, store: SettingsStore, base_config: Config):
+    def __init__(self, store: SettingsStore, base_config: Config, scheduler_timezone: Optional[tzinfo] = None):
         self.store = store
         self.base_config = clone_config(base_config)
+        self.scheduler_timezone = scheduler_timezone or load_scheduler_timezone()
         self.lock = threading.Lock()
         self.wakeup = threading.Event()
         self.manual_queue: List[int] = []
@@ -877,7 +907,7 @@ class BackgroundScheduler:
 
     def _list_scheduled_accounts(self) -> List[tuple[Dict[str, Any], datetime]]:
         scheduled: List[tuple[Dict[str, Any], datetime]] = []
-        current_time = datetime.now()
+        current_time = scheduler_now(self.scheduler_timezone)
         for account in self.store.list_enabled_accounts_for_scheduler():
             crontab_expr = str(account.get("crontab") or "").strip()
             if not crontab_expr:
@@ -885,10 +915,20 @@ class BackgroundScheduler:
             if not croniter.is_valid(crontab_expr):
                 log_info(f"Skip invalid CRONTAB for account={account['name']}: {crontab_expr}")
                 continue
-            next_run = croniter(crontab_expr, current_time).get_next(datetime)
-            scheduled.append((account, next_run))
+            next_run = next_run_at(crontab_expr, self.scheduler_timezone, current_time)
+            if next_run:
+                scheduled.append((account, next_run))
         scheduled.sort(key=lambda item: item[1])
         return scheduled
+
+    def _set_waiting_state(self, next_account: Dict[str, Any], next_run: datetime) -> None:
+        next_run_text = format_schedule_time(next_run)
+        self._set_state(
+            scheduler_status="waiting",
+            running=False,
+            next_run_at=next_run_text,
+            schedule_message=f"Waiting for {next_account['name']} at {next_run_text}",
+        )
 
     def _loop(self) -> None:
         while True:
@@ -910,15 +950,9 @@ class BackgroundScheduler:
                 continue
 
             next_account, next_run = scheduled[0]
-            next_run_text = next_run.strftime("%Y-%m-%d %H:%M:%S")
-            self._set_state(
-                scheduler_status="waiting",
-                running=False,
-                next_run_at=next_run_text,
-                schedule_message=f"Waiting for {next_account['name']} at {next_run_text}",
-            )
+            self._set_waiting_state(next_account, next_run)
 
-            wait_seconds = max(0, (next_run - datetime.now()).total_seconds())
+            wait_seconds = max(0, (next_run - scheduler_now(self.scheduler_timezone)).total_seconds())
             triggered = self.wakeup.wait(timeout=wait_seconds)
             self.wakeup.clear()
             if triggered:
@@ -961,7 +995,8 @@ def create_app(args: argparse.Namespace) -> Flask:
 
     store = SettingsStore(args.db_path)
     store.ensure_admin(args.admin_username, args.admin_password)
-    scheduler = BackgroundScheduler(store, base_config)
+    scheduler_timezone = load_scheduler_timezone()
+    scheduler = BackgroundScheduler(store, base_config, scheduler_timezone)
     scheduler.start()
 
     # Disable Flask's built-in /static route so /static/admin/* can be served from the frontend dist directory.
@@ -1036,6 +1071,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             "db_path": args.db_path,
             "log_file": args.log_file,
             "frontend_dist": args.frontend_dist,
+            "scheduler_timezone": str(getattr(scheduler_timezone, "key", scheduler_timezone)),
         }
 
     def serialize_platform(platform: Dict[str, Any]) -> Dict[str, Any]:
@@ -1090,7 +1126,7 @@ def create_app(args: argparse.Namespace) -> Flask:
             "last_downloaded": str(account.get("last_downloaded") or ""),
             "last_bonus": str(account.get("last_bonus") or ""),
             "last_login": str(account.get("last_login") or ""),
-            "next_run_at": next_run_text(account.get("crontab")),
+            "next_run_at": next_run_text(account.get("crontab"), scheduler_timezone),
             "has_password": bool(str(account.get("password") or "")),
             "has_totpsecret": bool(str(account.get("totpsecret") or "")),
             "has_m_team_auth": bool(str(account.get("m_team_auth") or "")),

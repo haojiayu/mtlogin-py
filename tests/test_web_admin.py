@@ -1,12 +1,14 @@
 import argparse
 import json
+import os
 import sys
 import tempfile
 import types
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 
 class _FakeCroniter:
@@ -20,6 +22,14 @@ class _FakeCroniter:
         return bool(text) and len(text.split()) == 5 and "invalid" not in text
 
     def get_next(self, _cls):
+        parts = str(self.expr or "").split()
+        if len(parts) == 5 and parts[0].isdigit() and parts[1].isdigit():
+            minute = int(parts[0])
+            hour = int(parts[1])
+            candidate = self.current_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if candidate <= self.current_time:
+                candidate += timedelta(days=1)
+            return candidate
         return self.current_time + timedelta(hours=1)
 
 
@@ -418,6 +428,58 @@ class WebAdminTests(unittest.TestCase):
         self.assertEqual("12345", account["last_bonus"])
         self.assertEqual("2026-04-21 09:59:59", account["last_login"])
         self.assertTrue(account["next_run_at"])
+
+    def test_account_api_next_run_uses_scheduler_timezone(self) -> None:
+        fixed_utc_now = datetime(2026, 4, 24, 16, 30, tzinfo=ZoneInfo("UTC"))
+        with patch.dict(os.environ, {"SCHEDULER_TIMEZONE": "Asia/Shanghai"}), patch("app.scheduler_now", return_value=fixed_utc_now):
+            flask_app, client = self.make_test_client()
+            store = flask_app.config["STORE"]
+            platform = store.get_platform_by_code(web_app.DEFAULT_MT_CODE)
+            account_id = store.save_account(
+                {
+                    "name": "timezone-account",
+                    "platform_id": platform["id"],
+                    "enabled": True,
+                    "username": "tz",
+                    "password": "tz-pass",
+                    "crontab": "0 0 * * *",
+                },
+                [],
+            )
+
+            response = client.get("/api/admin/accounts")
+
+        payload = response.get_json()["data"]
+        account = next(item for item in payload["items"] if item["id"] == account_id)
+        self.assertEqual("2026-04-26 00:00:00", account["next_run_at"])
+
+    def test_scheduler_waiting_state_uses_scheduler_timezone(self) -> None:
+        fixed_utc_now = datetime(2026, 4, 24, 16, 30, tzinfo=ZoneInfo("UTC"))
+        store = web_app.SettingsStore(self.db_path)
+        platform = store.get_platform_by_code(web_app.DEFAULT_MT_CODE)
+        store.save_account(
+            {
+                "name": "timezone-scheduled",
+                "platform_id": platform["id"],
+                "enabled": True,
+                "username": "tz",
+                "password": "tz-pass",
+                "crontab": "0 0 * * *",
+            },
+            [],
+        )
+
+        base_config = load_config()
+        base_config.db_path = self.db_path
+        scheduler = web_app.BackgroundScheduler(store, base_config, ZoneInfo("Asia/Shanghai"))
+
+        with patch("app.scheduler_now", return_value=fixed_utc_now):
+            scheduled = scheduler._list_scheduled_accounts()
+        scheduler._set_waiting_state(scheduled[0][0], scheduled[0][1])
+        state = scheduler.snapshot()
+
+        self.assertEqual("2026-04-26 00:00:00", state["next_run_at"])
+        self.assertEqual("Waiting for timezone-scheduled at 2026-04-26 00:00:00", state["schedule_message"])
 
     def test_history_api_supports_filters(self) -> None:
         flask_app, client = self.make_test_client()

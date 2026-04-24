@@ -40,16 +40,20 @@ The system SHALL support the existing task execution fields for each account, in
 - **THEN** the system persists the account-specific execution options for future scheduled runs
 
 ### Requirement: Account list shows latest execution summary and next scheduled time
-The system SHALL show the latest available execution summary for each account in the account management list, including uploaded amount, downloaded amount, bonus, last successful login time, and next scheduled execution time.
+The system SHALL show the latest available execution summary for each account in the account management list, including uploaded amount, downloaded amount, bonus, last successful login time, and next scheduled execution time calculated in the configured scheduler timezone.
 
 #### Scenario: Account has execution history and valid schedule
 - **WHEN** an administrator opens the account management page for an account that has execution history and a valid cron schedule
 - **THEN** the account row shows the latest uploaded amount, downloaded amount, and bonus values from the most recent execution record
 - **THEN** the account row shows the latest successful login time returned by execution history
-- **THEN** the account row shows the next scheduled execution time calculated from the account cron expression
+- **THEN** the account row shows the next scheduled execution time calculated from the account cron expression in the configured scheduler timezone
 
 #### Scenario: Account has no execution history or no next run
 - **WHEN** an administrator opens the account management page for an account that has no execution history, no cron expression, or an invalid cron expression
 - **THEN** the account row shows explicit empty-state values for the missing execution summary fields
 - **THEN** the account row shows no next scheduled execution time until a valid schedule is available
 
+#### Scenario: Scheduler timezone differs from process timezone
+- **WHEN** the configured scheduler timezone differs from the container or host process timezone
+- **THEN** the account row calculates the next scheduled execution from the configured scheduler timezone
+- **THEN** the displayed next scheduled execution is the next future run in that scheduler timezone, not the most recent already-passed run in another timezone

@@ -1,18 +1,25 @@
 # MTLogin 管理后台
 
-这个项目现在是一个带登录后台的 M-Team 管理服务。管理员登录后，会进入一个基于 `Vue 3 + Vite 7.3.1` 的管理控制台，可以分别管理平台配置、通知渠道、多个登录账户、执行记录和系统设置；后台会按账户级 cron 计划执行登录/刷新操作，也支持按账户手动立即执行。
+MTLogin 是一个带 Web 管理后台的 M-Team 登录/刷新服务。后台使用 Flask + SQLite 提供管理 API，前端使用 Vue 3 + Vite 构建单页控制台，支持平台配置、通知渠道、多个登录账户、执行记录和系统设置。
 
-## 安装依赖
+核心能力：
+
+- 多账号独立管理，每个账户绑定一个平台和多个通知渠道
+- 按账户配置 M-Team 登录参数、Auth Token、代理、Cookie 策略和 Cron 表达式
+- 后台调度线程按账户级 Cron 自动执行，也支持账户行内立即执行
+- 账户列表展示最近执行摘要和下次执行时间
+- 执行记录持久化，支持按账户、平台、状态和时间范围查询
+- Docker 部署可显式指定调度时区，避免容器时区影响 Cron 解释
+
+## 快速启动
+
+安装 Python 依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 本地启动
-
-### 只启动 Flask（生产式集成）
-
-先构建前端，再让 Flask 分发 `frontend/dist`：
+构建前端并启动 Flask：
 
 ```bash
 cd frontend
@@ -22,29 +29,9 @@ cd ..
 python app.py
 ```
 
-### 前后端分离开发
+默认访问地址是 `http://127.0.0.1:8000`。默认管理员账号为 `admin`，默认密码为 `admin123456`，首次登录后建议立即在 `系统设置` 中修改。
 
-```bash
-python app.py
-
-cd frontend
-pnpm install
-pnpm dev
-```
-
-默认行为：
-
-- 管理后台地址：`http://127.0.0.1:8000`
-- Vite 开发地址：`http://127.0.0.1:3333`
-- 默认管理员账号：`admin`
-- 默认管理员密码：`admin123456`
-- 本地数据库：`./mtlogin.db`
-- 本地日志：`./mtlogin.log`
-- 前端构建目录：`./frontend/dist`
-
-首次登录后建议立即在后台修改管理员密码。
-
-如果需要自定义启动参数：
+常用启动参数：
 
 ```bash
 python app.py \
@@ -57,7 +44,7 @@ python app.py \
   --admin-password admin123456
 ```
 
-## Docker 使用
+## Docker 部署
 
 构建镜像：
 
@@ -65,82 +52,40 @@ python app.py \
 docker build -t mtlogin-py .
 ```
 
-运行容器：
+建议使用 volume 持久化 SQLite 数据库和日志，并显式设置调度时区：
 
 ```bash
-docker run --rm -p 8000:8000 mtlogin-py
-```
+docker volume create mtlogin-data
 
-如果你想在首次启动时指定管理员账号密码：
-
-```bash
-docker run --rm -p 8000:8000 \
+docker run -d \
+  --name mtlogin \
+  -p 8000:8000 \
   -e ADMIN_USERNAME="admin" \
   -e ADMIN_PASSWORD="change-me-now" \
-  mtlogin-py
+  -e SCHEDULER_TIMEZONE="Asia/Shanghai" \
+  -v mtlogin-data:/data \
+  mtlogin-py \
+  python app.py \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --db-path /data/mtlogin.db \
+    --log-file /data/mtlogin.log \
+    --frontend-dist /app/frontend/dist
 ```
 
-容器内会把日志和 SQLite 数据库写到 `/app/mtlogin.log`、`/app/mtlogin.db`，不需要映射宿主机。
+容器默认把数据库和日志写入 `/app/mtlogin.db`、`/app/mtlogin.log`。如果要持久化数据，建议像上面一样挂载 `/data` 并把 `--db-path`、`--log-file` 指向 `/data`。如果使用 `--rm` 且不挂载持久化目录，容器删除后数据库和日志也会删除。
 
-## 后台功能
+## 调度时区
 
-- 管理员账号密码登录
-- 现代化 Vue 单页管理控制台
-- 平台配置独立页面
-- 通知管理独立页面
-- 多个登录账户独立管理页面
-- 账户绑定一个平台和多个通知渠道
-- 账户列表展示上传量、下载量、魔力值、最近一次登录成功时间、下次执行时间
-- 按账户手动立即执行
-- 后台线程按账户级 cron 表达式定时执行
-- 执行记录独立查询页面
-- 系统设置独立页面，可修改管理员账号并查看最近日志
+账户 Cron 表达式按 `SCHEDULER_TIMEZONE` 指定的 IANA 时区计算下次执行时间和实际调度时间，例如：
 
-## 页面结构
+```bash
+SCHEDULER_TIMEZONE=Asia/Shanghai
+```
 
-登录成功后默认进入 `账户管理` 页面，同时后台提供统一导航：
+未设置 `SCHEDULER_TIMEZONE` 时，程序会尝试使用 `TZ`；两者都未设置时，使用当前进程本地时区。Docker 部署建议始终显式设置 `SCHEDULER_TIMEZONE`。
 
-- `账户管理`：维护账户配置、平台绑定、通知绑定，并查看最近执行摘要与下次执行时间
-- `平台配置`：查看内置平台及启停状态
-- `通知管理`：维护 Telegram 通知渠道
-- `执行记录`：按条件筛选历史执行结果
-- `系统设置`：修改管理员账号密码，并查看当前运行环境和最近日志
-
-兼容入口 `/dashboard` 仍然保留，并在前端路由中跳转到 `账户管理` 页面。
-
-## 后台配置说明
-
-登录后台后可以管理这几类数据：
-
-- `平台配置`
-  - 当前内置 `mt` 平台
-  - `API Host` 固定为 `api.m-team.io`
-  - `API Referer` 固定为 `https://kp.m-team.cc/`
-- `通知管理`
-  - 当前仅支持 `tg` 渠道
-  - 可配置 `Telegram Bot Token`、`Telegram Chat ID`、`Telegram 代理`
-- `登录账户`
-  - 每个账户可配置 `M-Team 用户名`、`M-Team 密码`、`TOTP 密钥`、`代理`、`Cron 表达式`
-  - 可配置 `M-Team Auth Token`、`M-Team DID`、`超时秒数`、`Cookie 模式`、`跳过缓存`
-  - 每个账户必须绑定一个已启用平台
-  - 每个账户可勾选多个已启用通知渠道
-  - 列表会显示最近一次执行的上传量、下载量、魔力值、最近一次登录成功时间，以及下次执行时间
-- `执行记录`
-  - 支持按账户、平台、状态、时间范围查询
-  - 按最近执行时间倒序展示
-- `系统设置`
-  - 独立管理管理员账号密码
-  - 查看当前服务监听地址、数据库路径、日志路径、前端构建目录和最近日志
-
-说明：
-
-- 密码、TOTP、Auth Token、Telegram Token 这些敏感字段在页面里留空时，不会覆盖已有值。
-- 配置保存后，后台调度线程会自动重新加载计划。
-- “立即执行”现在是账户级操作，会将结果写入执行记录。
-- 升级到新版本后，如果数据库里存在旧的单任务配置，系统会自动迁移出默认账户和默认 TG 通知渠道。
-- 管理前端通过 `/api/admin/**` 调用 Flask JSON API，认证仍然以 Flask Session 为准。
-
-## 常见 Cron 示例
+常见 Cron 示例：
 
 ```bash
 # 每 2 小时的第 2 分钟执行一次
@@ -153,9 +98,34 @@ docker run --rm -p 8000:8000 \
 */15 * * * *
 ```
 
+## 后台页面
+
+登录后默认进入 `账户管理` 页面。当前后台包含：
+
+- `账户管理`：维护账户、平台绑定、通知绑定、Cron 计划，并查看最近执行摘要和下次执行时间
+- `平台配置`：查看内置 M-Team 平台及启停状态
+- `通知管理`：维护 Telegram 通知渠道
+- `执行记录`：查询手动或定时执行产生的历史记录
+- `系统设置`：修改管理员账号密码，查看运行环境和日志尾部
+
+兼容入口 `/dashboard` 会跳转到账户管理页面。管理前端通过 `/api/admin/**` 调用 Flask JSON API，认证基于 Flask Session。
+
+## 账户配置
+
+每个登录账户支持这些运行参数：
+
+- `M-Team 用户名`、`M-Team 密码`、`TOTP 密钥`
+- `M-Team Auth Token`、`M-Team DID`
+- `代理`、`Cron 表达式`
+- `超时秒数`、`Cookie 模式`、`跳过缓存`
+- 一个已启用平台
+- 零个或多个已启用通知渠道
+
+密码、TOTP、Auth Token、Telegram Token 等敏感字段在编辑时留空不会覆盖已保存的值。
+
 ## 环境变量
 
-`app.py` 启动时支持这些环境变量：
+`app.py` 支持这些运行环境变量：
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
@@ -164,11 +134,13 @@ docker run --rm -p 8000:8000 \
 | `DB_PATH` | `./mtlogin.db` | SQLite 数据库路径 |
 | `LOG_FILE` | `./mtlogin.log` | 日志文件路径 |
 | `FRONTEND_DIST` | `./frontend/dist` | Flask 分发的前端构建目录 |
-| `ADMIN_USERNAME` | `admin` | 初始管理员用户名 |
+| `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次初始化时使用 |
 | `ADMIN_PASSWORD` | `admin123456` | 初始管理员密码，仅首次初始化时使用 |
 | `SECRET_KEY` | 随机生成 | Flask Session 密钥 |
+| `SCHEDULER_TIMEZONE` | `TZ` 或进程本地时区 | 账户 Cron 调度使用的 IANA 时区 |
+| `TZ` | 空 | 未设置 `SCHEDULER_TIMEZONE` 时的调度时区 fallback |
 
-M-Team 相关参数仍然支持通过环境变量提供初始默认值，后台未保存配置时会使用这些默认值：
+后台未保存账户配置时，部分 M-Team 默认值仍可从环境变量读取：
 
 - `USERNAME`
 - `PASSWORD`
@@ -185,24 +157,51 @@ M-Team 相关参数仍然支持通过环境变量提供初始默认值，后台�
 - `TIME_OUT`
 - `COOKIE_MODE`
 
-## 兼容的脚本模式
+## 开发模式
 
-原来的 `mtlogin.py` 仍然保留，可以继续单独作为脚本运行：
+后端和前端可以分开启动：
+
+```bash
+python app.py
+
+cd frontend
+pnpm install
+pnpm dev
+```
+
+默认 Vite 开发地址是 `http://127.0.0.1:3333`。
+
+常用验证命令：
+
+```bash
+PYTHONPATH=. python3 tests/test_web_admin.py
+
+cd frontend
+pnpm build
+```
+
+## 脚本模式
+
+`mtlogin.py` 仍可作为单次或定时脚本单独运行：
 
 ```bash
 python mtlogin.py --username "站点用户名" --password "站点密码" --totpsecret "TOTP密钥"
 ```
 
-也仍然支持：
+常用参数：
 
+- `--m-team-auth`
+- `--m-team-did`
 - `--proxy`
 - `--crontab`
 - `--skip-cache`
 - `--log-file`
 - `--db-path`
 
+如果指定 `--crontab`，脚本会按该表达式循环执行；否则只执行一次。
+
 ## 安全说明
 
 - 管理员密码以哈希形式保存在 SQLite 中。
-- M-Team 密码和 TOTP 需要可逆使用，所以仍会明文保存在本地数据库里。
-- HTTP 调试日志已对密码、OTP 和 Authorization 做脱敏，但仍建议限制数据库和日志文件权限。
+- M-Team 密码、TOTP 和 Auth Token 需要可逆使用，仍会保存在本地数据库中。
+- HTTP 调试日志会脱敏密码、OTP 和 Authorization，但仍建议限制数据库和日志文件访问权限。
